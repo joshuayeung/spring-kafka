@@ -4,11 +4,20 @@ import lombok.RequiredArgsConstructor;
 import net.datafaker.Faker;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.serialization.Serde;
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.streams.kstream.Grouped;
+import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.KTable;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.event.ApplicationStartedEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.event.EventListener;
+import org.springframework.kafka.annotation.EnableKafkaStreams;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -17,10 +26,12 @@ import reactor.core.publisher.Flux;
 import reactor.util.function.Tuple2;
 
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
 @SpringBootApplication
+@EnableKafkaStreams
 public class SpringCcloudApplication {
 
     public static void main(String[] args) {
@@ -30,6 +41,11 @@ public class SpringCcloudApplication {
     @Bean
     NewTopic hobbit2() {
         return TopicBuilder.name("hobbit2").partitions(12).replicas(1).build();
+    }
+
+    @Bean
+    NewTopic counts() {
+        return TopicBuilder.name("streams-wordcount-output").partitions(6).replicas(1).build();
     }
 
 }
@@ -58,8 +74,30 @@ class Producer {
 @Component
 class Consumer {
 
-    @KafkaListener(topics = {"hobbit"}, groupId = "spring-boot-kafka")
-    public void consume(ConsumerRecord<Integer, String> record) {
+    @KafkaListener(topics = {"streams-wordcount-output"}, groupId = "spring-boot-kafka")
+    public void consume(ConsumerRecord<String, Long> record) {
         System.out.println("received = " + record.value() + " with key " + record.key());
     }
+}
+
+
+@Component
+class Processor {
+
+    @Autowired
+    public void process(StreamsBuilder builder) {
+
+        final Serde<Integer> integerSerde = Serdes.Integer();
+        final Serde<String> stringSerde = Serdes.String();
+
+        KStream<Integer, String> textLines = builder.stream("hobbit", Consumed.with(integerSerde, stringSerde));
+
+        KTable<String, Long> wordCounts = textLines.flatMapValues(value -> Arrays.asList(value.toLowerCase().split("\\W+")))
+                .groupBy((key, value) -> value, Grouped.with(stringSerde, stringSerde))
+                .count();
+
+        wordCounts.toStream().to("streams-wordcount-output");
+
+    }
+
 }
